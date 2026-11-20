@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="{{csp}}">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="{{cssUri}}">
+  <title>Cursor Bridge</title>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">CB</div>
+        <div>
+          <div class="brand-title">Cursor Bridge</div>
+          <div class="brand-sub">v{{version}}</div>
+        </div>
+      </div>
+      <nav class="nav" id="nav">
+        <button class="nav-item active" data-page="overview">概览</button>
+        <button class="nav-item" data-page="providers">提供者</button>
+        <button class="nav-item" data-page="models">模型</button>
+        <button class="nav-item" data-page="calls">调用</button>
+        <button class="nav-item" data-page="database">数据库</button>
+        <button class="nav-item" data-page="diagnostics">诊断</button>
+        <button class="nav-item" data-page="logs">日志</button>
+      </nav>
+      <div class="sidebar-footer">
+        <span class="dot" id="serviceDot"></span>
+        <span id="serviceLabel">连接中…</span>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="status-badge" id="statusBadge">正在读取状态…</div>
+        <div class="topbar-actions">
+          <button class="btn" id="btnStart">启用</button>
+          <button class="btn" id="btnStop">停止并还原</button>
+          <button class="btn" id="btnRestart">重启</button>
+          <button class="btn ghost" id="btnReload">重载窗口</button>
+        </div>
+      </header>
+
+      <div class="banners" id="banners"></div>
+
+      <div class="content">
+        <section class="page active" id="page-overview">
+          <div class="cards" id="overviewCards"></div>
+          <div class="panel" id="onboardingPanel" hidden></div>
+        </section>
+
+        <section class="page" id="page-providers">
+          <div class="section-head">
+            <h2>提供者</h2>
+            <div>
+              <button class="btn" id="btnImportMagpie">导入 Magpie</button>
+              <button class="btn primary" id="btnAddProvider">添加自定义</button>
+            </div>
+          </div>
+          <div id="providerList" class="list"></div>
+        </section>
+
+        <section class="page" id="page-models">
+          <div class="section-head">
+            <h2>模型</h2>
+            <div class="muted" id="modelSummary"></div>
+          </div>
+          <div id="modelGroups" class="list"></div>
+        </section>
+
+        <section class="page" id="page-calls">
+          <div class="section-head">
+            <h2>最近调用</h2>
+            <button class="btn" id="btnRefreshCalls">刷新</button>
+          </div>
+          <div class="cards mini" id="callSummary"></div>
+          <div class="table-wrap">
+            <table class="table" id="callTable">
+              <thead>
+                <tr><th>时间</th><th>提供者</th><th>模型</th><th>状态</th><th>耗时</th><th>TTFB</th><th>Tokens</th><th>错误</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <button class="btn" id="btnMoreCalls">加载更多</button>
+        </section>
+
+        <section class="page" id="page-database">
+          <div class="section-head">
+            <h2>引擎数据库</h2>
+            <div>
+              <button class="btn" id="btnDbStats">统计</button>
+              <button class="btn" id="btnDbDeep">深度统计</button>
+              <button class="btn" id="btnDbPrune">清理旧链路</button>
+              <button class="btn" id="btnDbVacuum">VACUUM</button>
+            </div>
+          </div>
+          <div class="muted" id="dbMeta">尚未统计。</div>
+          <div class="table-wrap">
+            <table class="table" id="dbTable">
+              <thead><tr><th>分类</th><th>表</th><th>行数</th><th>内容字节</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="page" id="page-diagnostics">
+          <div class="section-head">
+            <h2>分层自检</h2>
+            <button class="btn primary" id="btnDiagnose">运行诊断</button>
+          </div>
+          <div id="diagnosticList" class="list"></div>
+        </section>
+
+        <section class="page" id="page-logs">
+          <div class="section-head">
+            <h2>日志</h2>
+            <div>
+              <select class="input select" id="logSource">
+                <option value="engine">引擎</option>
+                <option value="service">服务</option>
+              </select>
+              <button class="btn" id="btnLogs">刷新</button>
+              <button class="btn ghost" id="btnCopyLogs">复制</button>
+            </div>
+          </div>
+          <pre class="log" id="logText">点击「刷新」读取日志尾部。</pre>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <div class="modal" id="modal" hidden>
+    <div class="modal-backdrop" id="modalBackdrop"></div>
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3 id="modalTitle">编辑提供者</h3>
+        <button class="icon-btn" id="modalClose">×</button>
+      </div>
+      <div class="modal-body" id="modalBody"></div>
+      <div class="modal-foot">
+        <button class="btn" id="modalCancel">取消</button>
+        <button class="btn primary" id="modalSave">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <script nonce="{{nonce}}" src="{{scriptUri}}"></script>
+</body>
+</html>

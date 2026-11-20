@@ -1,0 +1,113 @@
+{
+  "name": "cursor-bridge",
+  "displayName": "Cursor Bridge",
+  "description": "在 Cursor 中接入 Magpie 或任意 OpenAI 兼容平台：本地桥接、聚合模型目录、一键启用。",
+  "version": "0.1.0",
+  "publisher": "kingchen95272025",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "cursor",
+    "bridge",
+    "openai",
+    "magpie",
+    "byok"
+  ],
+  "main": "./extension.js",
+  "extensionKind": [
+    "ui"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "cursorBridge.openConsole",
+        "title": "打开桥接控制台",
+        "category": "Cursor Bridge"
+      },
+      {
+        "command": "cursorBridge.start",
+        "title": "启用桥接",
+        "category": "Cursor Bridge"
+      },
+      {
+        "command": "cursorBridge.stop",
+        "title": "停止并还原代理",
+        "category": "Cursor Bridge"
+      },
+      {
+        "command": "cursorBridge.restart",
+        "title": "重启桥接",
+        "category": "Cursor Bridge"
+      },
+      {
+        "command": "cursorBridge.restoreProxy",
+        "title": "仅还原代理设置",
+        "category": "Cursor Bridge"
+      }
+    ],
+    "configuration": {
+      "title": "Cursor Bridge",
+      "properties": {
+        "cursorBridge.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Cursor 启动时自动拉起桥接服务。"
+        },
+        "cursorBridge.proxyPort": {
+          "type": "number",
+          "default": 58160,
+          "description": "本地 TLS 代理端口；重启桥接后沿用该端口，避免 Cursor 需要重载。"
+        },
+        "cursorBridge.runMode": {
+          "type": "string",
+          "enum": [
+            "default",
+            "lite"
+          ],
+          "enumDescriptions": [
+            "默认：会话与调用记录落盘（SQLite）。",
+            "轻量：数据库在内存中，不落盘。"
+          ],
+          "default": "default",
+          "description": "原生引擎运行模式。"
+        },
+        "cursorBridge.refreshSeconds": {
+          "type": "number",
+          "default": 15,
+          "description": "模型目录刷新间隔（秒）。"
+        },
+        "cursorBridge.logLimitMB": {
+          "type": "number",
+          "default": 4,
+          "description": "引擎日志文件上限（MB），超出后滚动。"
+        },
+        "cursorBridge.tracesRetentionDays": {
+          "type": "number",
+          "default": 0,
+          "description": "调用链路记录自动保留天数；0 表示不自动清理。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "package:all": "node scripts/package-vsix.js all",
+    "package:host": "node scripts/package-vsix.js host"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kingchen95272025/cursor-bridge.git"
+  },
+  "homepage": "https://github.com/kingchen95272025/cursor-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/kingchen95272025/cursor-bridge/issues"
+  }
+}
