@@ -66,6 +66,7 @@ class BridgeService {
     this.proxyInfo = {expected: null, current: null, journaled: false, active: false, restartRequired: false};
     this.conflicts = {detected: false, items: []};
     this.calls = new CallStore(this.paths.calls, {retentionDays: 30});
+    this.ccSwitchCache = this.readCcSwitchCache();
     this.backupFile = null;
 
     this.starting = false;
@@ -76,6 +77,27 @@ class BridgeService {
     this.lastEffective = '';
     this.timers = [];
     this.lockDir = this.paths.lock;
+  }
+
+  // cc-switch's stored URL is the Anthropic endpoint; the OpenAI route is
+  // usually the gateway root or /v1. Probing the candidates costs a few
+  // requests, so the first successful one is remembered per cc-switch
+  // provider and reused until it stops answering.
+  readCcSwitchCache() {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(this.paths.ccSwitchCache, 'utf8'));
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  rememberCcSwitchEndpoint(key, baseUrl) {
+    if (!key || !baseUrl) return;
+    const previous = this.ccSwitchCache[key];
+    this.ccSwitchCache[key] = {baseUrl, at: Date.now()};
+    if (previous?.baseUrl === baseUrl && Date.now() - Number(previous.at || 0) < 60000) return;
+    try { atomic(this.paths.ccSwitchCache, JSON.stringify(this.ccSwitchCache, null, 2)); } catch { /* cache is optional */ }
   }
 
   runtime() {
@@ -278,7 +300,7 @@ class BridgeService {
     // secrets yet; the extension pushes them right after spawn. Re-resolving
     // the provider table here makes that hand-off invisible to the user: a
     // key that arrives now is used by the very next refresh.
-    const resolved = providers.resolve(this.config.providers, this.secrets, this.home);
+    const resolved = providers.resolve(this.config.providers, this.secrets, this.home, {ccSwitchCache: this.ccSwitchCache});
     this.providerProblems = resolved.problems;
     this.providersMap = new Map(resolved.providers.map((provider) => [provider.id, provider]));
     if (this.engine?.running || this.shim) {
@@ -372,7 +394,7 @@ class BridgeService {
         return;
       }
 
-      const resolved = providers.resolve(this.config.providers, this.secrets, this.home);
+      const resolved = providers.resolve(this.config.providers, this.secrets, this.home, {ccSwitchCache: this.ccSwitchCache});
       this.providerProblems = resolved.problems;
       if (!resolved.providers.length) {
         this.setState('unconfigured', resolved.problems[0]?.message || '没有可用的提供者');
@@ -459,7 +481,14 @@ class BridgeService {
     if (!this.providersMap.size) return;
     const list = [...this.providersMap.values()];
     const previous = new Map(this.refreshed.map((entry) => [entry.provider.id, entry]));
-    const refreshed = await Promise.all(list.map((provider) => providers.refreshProvider(provider, previous.get(provider.id) || null)));
+    const refreshed = await Promise.all(list.map((provider) => providers.refreshProvider(
+      provider,
+      previous.get(provider.id) || null,
+      {onEndpoint: (key, baseUrl) => this.rememberCcSwitchEndpoint(key, baseUrl)}
+    )));
+    // A live provider can move to a different base URL after probing; the shim
+    // routes through this map, so it must see the resolved URL immediately.
+    for (const entry of refreshed) this.providersMap.set(entry.provider.id, entry.provider);
     this.refreshed = refreshed;
     const built = catalogue.build(refreshed, this.config.modelPrefs);
     this.catalogue = built;
@@ -662,6 +691,8 @@ class BridgeService {
         models: entry.models?.length || 0,
         error: entry.error || null,
         hasKey: !!entry.provider.key,
+        ccSwitchName: entry.provider.ccSwitch?.name || null,
+        ccSwitchImplicit: entry.provider.ccSwitch?.implicit === true,
         refreshedAt: entry.refreshedAt
       })),
       providerProblems: this.providerProblems,

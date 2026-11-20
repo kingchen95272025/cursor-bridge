@@ -44,17 +44,23 @@ function normalizeProvider(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const id = String(raw.id || '').trim().toLowerCase();
   if (!PROVIDER_ID.test(id)) return null;
-  const type = raw.type === 'magpie' ? 'magpie' : 'openai';
+  const type = raw.type === 'magpie' ? 'magpie' : raw.type === 'cc-switch' ? 'cc-switch' : 'openai';
   const name = String(raw.name || id).trim().slice(0, 64) || id;
   let baseUrl = String(raw.baseUrl || '').trim().replace(/\/+$/, '');
   if (type === 'magpie' && !baseUrl) baseUrl = 'http://127.0.0.1:3425/v1';
-  if (!baseUrl) return null;
-  try {
-    const url = new URL(baseUrl);
-    if (!['http:', 'https:'].includes(url.protocol)) return null;
-    if (url.username || url.password) return null;
-  } catch {
-    return null;
+  if (type === 'cc-switch') {
+    // The live provider follows cc-switch, so the stored URL is irrelevant;
+    // it is resolved from cc-switch on every refresh.
+    baseUrl = '';
+  } else {
+    if (!baseUrl) return null;
+    try {
+      const url = new URL(baseUrl);
+      if (!['http:', 'https:'].includes(url.protocol)) return null;
+      if (url.username || url.password) return null;
+    } catch {
+      return null;
+    }
   }
   const headers = {};
   if (raw.headers && typeof raw.headers === 'object') {
@@ -70,7 +76,10 @@ function normalizeProvider(raw) {
     type,
     name,
     enabled: raw.enabled !== false,
-    autoDiscover: type === 'magpie' && raw.autoDiscover !== false,
+    autoDiscover: type === 'cc-switch' || (type === 'magpie' && raw.autoDiscover !== false),
+    // cc-switch stores Anthropic endpoints; a custom provider may also point
+    // at a Claude-compatible gateway, hence the explicit protocol.
+    protocol: type === 'cc-switch' ? 'anthropic' : raw.protocol === 'anthropic' ? 'anthropic' : 'openai',
     baseUrl,
     headers,
     models

@@ -3,10 +3,11 @@
 在 Cursor 中直接使用 **Magpie** 或**任意 OpenAI 兼容平台**作为上游模型。
 
 - **形态**：标准 VS Code 扩展，通过 VSIX 安装到 Cursor，不修改 Cursor 安装包、不打补丁
-- **上游**：内置 Magpie 提供者（自动跟随 `connection.json`），同时支持任意自定义 Base URL
+- **上游**：内置 Magpie（自动跟随 `connection.json`）、**cc-switch**（自动跟随当前供应商）、任意自定义 Base URL
+- **协议**：OpenAI Chat Completions 与 **Anthropic Messages** 双向翻译，Claude Code 类网关可直接接入
 - **聚合**：多个提供者的模型同时出现在 Cursor 模型菜单，模型 ID 以 `<提供者>/<模型>` 前缀路由
 - **平台**：macOS（arm64 / x64）、Windows x64、Linux x64 / arm64
-- **当前版本**：`0.1.0`
+- **当前版本**：`0.2.0`
 
 ---
 
@@ -53,8 +54,10 @@ Cursor Bridge 换了一种分层方式：
 
 控制台 → **提供者**：
 
+- **接入 cc-switch（自动跟随）**：把 cc-switch 当前启用的供应商作为上游。之后在 cc-switch 里切换供应商，Cursor 侧在下个刷新周期自动跟随。
+- **导入 cc-switch**：多选 cc-switch 中已配置的 Claude / Claude Desktop 供应商一次性导入。插件会先探测其 OpenAI 兼容端点；没有 OpenAI 端点时自动按 Anthropic 协议接入。
 - **导入 Magpie**：读取 Magpie → Agents 页面写入的 `connection.json`。之后在 Magpie 里切换模型、修改目录，Cursor 侧每 15 秒跟随更新。
-- **添加自定义**：填写 OpenAI 兼容 Base URL 与 API Key。例如：
+- **添加自定义**：填写 Base URL 与 API Key，并选择协议（OpenAI 兼容或 Anthropic 兼容）。例如：
 
   | 平台 | Base URL 示例 |
   |---|---|
@@ -116,9 +119,10 @@ Cursor Bridge 换了一种分层方式：
 └─────────┼────────────────────────────────────────────────────┘
           │ http://127.0.0.1:<中继端口>/v1
    ┌──────▼───────────────────────────┐
-   │ 中继 → 当前启用的上游提供者         │
-   │  · Magpie（本机网关）              │
-   │  · 任意 OpenAI 兼容远程平台         │
+   │ 中继 → 当前启用的上游提供者          │
+   │  · Magpie（本机网关，OpenAI 协议）    │
+   │  · cc-switch（跟随当前供应商，Anthropic）│
+   │  · 自定义 Base URL（OpenAI / Anthropic）│
    └──────────────────────────────────┘
 ```
 
@@ -133,7 +137,10 @@ Cursor Bridge 换了一种分层方式：
 | 能力 | 状态 |
 |---|---|
 | Magpie 自动发现与模型实时同步 | ✅ |
-| 任意 OpenAI 兼容 Base URL | ✅ |
+| cc-switch 实时跟随当前供应商 | ✅ 0.2.0 |
+| cc-switch 供应商批量导入 | ✅ 0.2.0 |
+| Anthropic Messages 协议适配（含工具调用与流式） | ✅ 0.2.0 |
+| 任意 OpenAI / Anthropic 兼容 Base URL | ✅ |
 | 多提供者模型聚合 | ✅ |
 | 模型重命名 / 隐藏 / 排序 / 设为默认 | ✅ |
 | 调用日志：耗时、TTFB、tokens、错误 | ✅ |
@@ -192,6 +199,12 @@ A：至少启用一个提供者，且它返回了模型列表。Magpie 自动发
 
 **Q：Magpie 里换了模型，Cursor 没变化？**
 A：自动发现每 15 秒刷新一次（`cursorBridge.refreshSeconds`）。也可以在控制台点「重启」。
+
+**Q：cc-switch 供应商导入后没有模型 / 调用失败？**
+A：cc-switch 中保存的是 Anthropic 端点。插件会自动探测 OpenAI 端点，没有时按 Anthropic 协议接入。若供应商本身只提供 Anthropic 协议，插件会做协议翻译；如果仍失败，多半是该网关临时不可用或令牌过期，可先在 cc-switch 中确认它能正常对话。
+
+**Q：cc-switch 里切换了供应商，Cursor 没变化？**
+A：「接入 cc-switch」类型的提供者每 15 秒跟随一次当前供应商（`cursorBridge.refreshSeconds`）。在控制台「提供者」页可以看到当前跟随的是哪一个。
 
 **Q：想接多个平台？**
 A：直接添加多个提供者，全部启用后模型会聚合显示。模型 ID 冲突通过提供者前缀天然隔离。

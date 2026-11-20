@@ -1,6 +1,8 @@
 'use strict';
 const fs = require('node:fs');
 const platform = require('../lib/platform.js');
+const ccSwitch = require('./cc-switch.js');
+const {anthropicModelsEndpoint, anthropicHeaders} = require('./anthropic.js');
 
 // A provider is anything that speaks the OpenAI wire format. Magpie is the
 // built-in one: its agent page writes connection.json, and the VSIX reads that
@@ -39,13 +41,49 @@ function readMagpieConnection(home) {
   return null;
 }
 
+const CC_SWITCH_CACHE_TTL_MS = 60 * 60 * 1000;
+
 // Magpie validates its gateway as loopback; a custom provider may be remote.
 // Both end up as the same runtime record so the shim has one route table.
-function resolve(configProviders, secrets, home) {
+//
+// The `cc-switch` type is a live upstream: its URL and token come from the
+// provider cc-switch marks current, so switching providers there moves Cursor
+// on the next refresh — the same contract as Magpie's connection.json.
+function resolve(configProviders, secrets, home, {ccSwitchCache = {}} = {}) {
   const resolved = [];
   const problems = [];
   for (const provider of configProviders) {
     if (!provider.enabled) continue;
+    if (provider.type === 'cc-switch') {
+      const current = ccSwitch.current(home);
+      if (!current || !current.hasToken) {
+        problems.push({providerId: provider.id, message: 'cc-switch 中没有可用供应商：请先在 cc-switch 中选择一个已配置令牌的供应商。'});
+        continue;
+      }
+      // cc-switch stores an Anthropic base URL (ANTHROPIC_BASE_URL). The shim
+  // appends /v1/messages; probing an OpenAI route here would break the common
+  // case, where the gateway only speaks Anthropic.
+      resolved.push({
+        id: provider.id,
+        name: `${provider.name || 'cc-switch'} · ${current.name}`,
+        type: 'cc-switch',
+        protocol: 'anthropic',
+        baseUrl: current.baseUrl,
+        key: current.token,
+        headers: provider.headers || {},
+        knownModels: [...new Map([...current.models, ...(provider.models || [])]
+          .map((id) => [id, {id, name: id, context: null}])).values()],
+        preferredModel: null,
+        source: 'cc-switch',
+        ccSwitch: {
+          key: current.key,
+          name: current.name,
+          implicit: current.implicit,
+          candidates: current.candidates
+        }
+      });
+      continue;
+    }
     if (provider.type === 'magpie' && provider.autoDiscover) {
       const connection = readMagpieConnection(home);
       if (!connection) {
@@ -56,6 +94,7 @@ function resolve(configProviders, secrets, home) {
         id: provider.id,
         name: provider.name,
         type: 'magpie',
+        protocol: 'openai',
         baseUrl: connection.gateway,
         key: connection.key,
         headers: provider.headers || {},
@@ -69,6 +108,7 @@ function resolve(configProviders, secrets, home) {
       id: provider.id,
       name: provider.name,
       type: provider.type,
+      protocol: provider.protocol === 'anthropic' ? 'anthropic' : 'openai',
       baseUrl: provider.baseUrl,
       key: secrets[provider.id] || '',
       headers: provider.headers || {},
@@ -132,24 +172,72 @@ async function fetchModels(provider, {timeoutMs = MODEL_TIMEOUT_MS} = {}) {
 // Provider model lists are merged by the catalogue; a provider that is down
 // must not hide the models it advertised earlier in the same session, so the
 // caller keeps the last good list and only surfaces the error.
-async function refreshProvider(provider, previous = null) {
-  try {
-    const models = await fetchModels(provider);
-    return {provider, models, error: null, refreshedAt: Date.now()};
-  } catch (error) {
-    return {
-      provider,
-      models: previous?.models?.length ? previous.models : provider.knownModels,
-      error: String(error?.message || error),
-      refreshedAt: Date.now()
-    };
+//
+// A live cc-switch provider tries its current base URL and then the derived
+// candidates; the first one that answers /models is reported through
+// onEndpoint so the service can cache it and stop probing every refresh.
+async function fetchAnthropicModels(provider, {timeoutMs = MODEL_TIMEOUT_MS} = {}) {
+  const url = anthropicModelsEndpoint(provider.baseUrl);
+  const headers = {
+    Accept: 'application/json',
+    'User-Agent': 'cursor-bridge/0.1',
+    ...anthropicHeaders(provider.key),
+    ...provider.headers
+  };
+  const response = await fetch(url, {headers, signal: AbortSignal.timeout(timeoutMs), redirect: 'error'});
+  if (!response.ok) throw new Error(`${provider.name} Anthropic 模型目录 HTTP ${response.status}`);
+  const body = await response.json();
+  const models = extractModels(body);
+  if (!models.length) throw new Error(`${provider.name} 未返回任何模型`);
+  return models;
+}
+
+async function refreshProvider(provider, previous = null, {onEndpoint = () => {}} = {}) {
+  if (provider.protocol === 'anthropic') {
+    try {
+      const models = await fetchAnthropicModels(provider);
+      return {provider, models, error: null, refreshedAt: Date.now()};
+    } catch (error) {
+      // Many Anthropic-compatible gateways do not implement /v1/models. The
+      // model names from cc-switch's env are what Claude Code itself uses, so
+      // they keep the provider usable; only surface an error when both fail.
+      const fallback = previous?.models?.length ? previous.models : provider.knownModels;
+      return {
+        provider,
+        models: fallback,
+        error: fallback.length ? null : String(error.message || error),
+        warning: fallback.length ? String(error.message || error) : null,
+        refreshedAt: Date.now()
+      };
+    }
   }
+  const live = provider.type === 'cc-switch';
+  const candidates = live
+    ? [...new Set([provider.baseUrl, ...(provider.ccSwitch?.candidates || [])].filter(Boolean))]
+    : [provider.baseUrl];
+  let lastError = null;
+  for (const baseUrl of candidates) {
+    try {
+      const models = await fetchModels({...provider, baseUrl}, {timeoutMs: live ? 2500 : MODEL_TIMEOUT_MS});
+      if (live && provider.ccSwitch?.key) onEndpoint(provider.ccSwitch.key, baseUrl);
+      return {provider: {...provider, baseUrl}, models, error: null, refreshedAt: Date.now()};
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  return {
+    provider,
+    models: previous?.models?.length ? previous.models : provider.knownModels,
+    error: String(lastError?.message || lastError || 'no endpoint answered'),
+    refreshedAt: Date.now()
+  };
 }
 
 module.exports = {
   readMagpieConnection,
   resolve,
   fetchModels,
+  fetchAnthropicModels,
   refreshProvider,
   normalizeModel,
   extractModels

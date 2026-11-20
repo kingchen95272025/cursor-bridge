@@ -4,6 +4,7 @@ const path = require('node:path');
 const vscode = require('vscode');
 
 const configStore = require('./src/config.js');
+const ccSwitch = require('./src/cc-switch.js');
 const providers = require('./src/providers.js');
 const {createPaths} = require('./src/paths.js');
 const {ensureService, ServiceClient, readServiceInfo} = require('./src/service-client.js');
@@ -38,6 +39,27 @@ function paths() {
 
 function secretKey(providerId) {
   return `${SECRET_PREFIX}${providerId}`;
+}
+
+function slugProvider(value) {
+  return String(value || '').toLowerCase().trim()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 28);
+}
+
+async function mapLimit(items, limit, worker) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const runners = Array.from({length: Math.min(limit, items.length)}, async () => {
+    while (true) {
+      const index = cursor++;
+      if (index >= items.length) return;
+      results[index] = await worker(items[index], index);
+    }
+  });
+  await Promise.all(runners);
+  return results;
 }
 
 function runtimeFromSettings() {
@@ -187,6 +209,34 @@ async function handleWebviewMessage(message) {
   }
 }
 
+// cc-switch providers speak Anthropic; Cursor needs OpenAI. Probe the derived
+// candidates before writing, so an imported entry already points at a working
+// /models endpoint when the gateway exposes one.
+async function probeCcSwitchBase(entry) {
+  let lastError = null;
+  for (const candidate of entry.candidates) {
+    try {
+      const models = await providers.fetchModels({
+        id: entry.id,
+        name: entry.name,
+        baseUrl: candidate,
+        key: entry.token,
+        headers: {},
+        knownModels: []
+      }, {timeoutMs: 2000});
+      return {baseUrl: candidate, models: [], probed: models.length, error: null};
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  return {
+    baseUrl: entry.baseUrl,
+    models: entry.models.slice(0, 20),
+    probed: 0,
+    error: lastError ? `未探测到 OpenAI 兼容端点：${lastError.message}` : '未探测到 OpenAI 兼容端点'
+  };
+}
+
 const handlers = {
   async status() {
     const service = await connect();
@@ -222,6 +272,98 @@ const handlers = {
     return {provider, detected: connection.models.length};
   },
 
+  async 'add-cc-switch-provider'() {
+    const home = require('node:os').homedir();
+    const current = ccSwitch.current(home);
+    if (!current || !current.hasToken) {
+      throw new Error('cc-switch 中没有可用供应商：请先在 cc-switch 中选择一个已配置令牌的供应商');
+    }
+    const config = localConfig();
+    const existing = config.providers.find((provider) => provider.type === 'cc-switch');
+    if (existing) {
+      return {provider: existing, existing: true, current: {name: current.name, implicit: current.implicit}};
+    }
+    const provider = {
+      id: uniqueProviderId('ccswitch', config),
+      type: 'cc-switch',
+      name: 'cc-switch',
+      enabled: true,
+      autoDiscover: true,
+      baseUrl: '',
+      headers: {},
+      models: []
+    };
+    config.providers.push(provider);
+    await pushConfig(config);
+    return {provider, existing: false, current: {name: current.name, implicit: current.implicit}};
+  },
+
+  async 'scan-cc-switch'() {
+    return ccSwitch.scan(require('node:os').homedir());
+  },
+
+  async 'import-cc-switch'({keys}) {
+    const requested = Array.isArray(keys)
+      ? [...new Set(keys.filter((key) => typeof key === 'string'))].slice(0, 50)
+      : [];
+    if (!requested.length) throw new Error('请先选择要导入的供应商');
+    const home = require('node:os').homedir();
+    const probed = await mapLimit(requested, 4, async (key) => {
+      try {
+        const entry = ccSwitch.load(home, key);
+        if (!entry.token) throw new Error('该供应商没有 ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY');
+        const probe = await probeCcSwitchBase(entry);
+        return {ok: true, entry, probe};
+      } catch (error) {
+        return {ok: false, key, error: String(error.message || error)};
+      }
+    });
+
+    const config = localConfig();
+    const imported = [];
+    const failed = [];
+    for (const result of probed) {
+      if (!result.ok) {
+        failed.push({name: result.key.split('\u0000')[0], error: result.error});
+        continue;
+      }
+      const {entry, probe} = result;
+      const existing = config.providers.find((provider) => provider.type === 'openai' && provider.name === entry.name);
+      const id = existing?.id || uniqueProviderId(slugProvider(entry.name) || 'ccswitch', config);
+      // Most cc-switch gateways only speak Anthropic. When no OpenAI route
+      // answers, import the provider as an Anthropic upstream instead of
+      // dropping it — the shim translates the protocol.
+      const protocol = probe.probed > 0 ? 'openai' : 'anthropic';
+      const provider = {
+        id,
+        type: 'openai',
+        name: entry.name,
+        enabled: true,
+        autoDiscover: false,
+        protocol,
+        baseUrl: protocol === 'anthropic' ? entry.baseUrl : probe.baseUrl,
+        headers: {},
+        models: protocol === 'anthropic' ? entry.models.slice(0, 20) : probe.models
+      };
+      const index = config.providers.findIndex((candidate) => candidate.id === id);
+      if (index >= 0) config.providers[index] = provider;
+      else config.providers.push(provider);
+      await context.secrets.store(secretKey(id), entry.token);
+      imported.push({
+        id,
+        name: entry.name,
+        baseUrl: provider.baseUrl,
+        models: protocol === 'anthropic' ? provider.models.length : probe.probed,
+        protocol,
+        warning: protocol === 'anthropic'
+          ? '未发现 OpenAI 端点，已按 Anthropic 协议接入'
+          : probe.error
+      });
+    }
+    if (imported.length) await pushConfig(config);
+    return {imported, failed};
+  },
+
   async 'save-provider'({provider: raw, key, clearKey}) {
     const normalized = configStore.normalizeProvider(raw);
     if (!normalized) throw new Error('Provider 配置无效：ID 只能包含小写字母、数字、- 和 _，Base URL 必须是 http(s) 地址');
@@ -255,14 +397,25 @@ const handlers = {
   async 'test-provider'({provider: raw, key}) {
     const normalized = configStore.normalizeProvider(raw);
     if (!normalized) throw new Error('Provider 配置无效');
+    const home = require('node:os').homedir();
     const savedKey = key || await context.secrets.get(secretKey(normalized.id)) || '';
+    if (normalized.type === 'cc-switch') {
+      const current = ccSwitch.current(home);
+      if (!current) throw new Error('cc-switch 中没有可用供应商');
+      const models = await providers.fetchAnthropicModels({baseUrl: current.baseUrl, key: current.token, headers: {}, name: current.name});
+      return {count: models.length, protocol: 'anthropic', sample: models.slice(0, 3).map((model) => model.id)};
+    }
+    if (normalized.protocol === 'anthropic') {
+      const models = await providers.fetchAnthropicModels({...normalized, key: savedKey});
+      return {count: models.length, protocol: 'anthropic', sample: models.slice(0, 3).map((model) => model.id)};
+    }
     const models = await providers.fetchModels({
       ...normalized,
       key: normalized.type === 'magpie' && normalized.autoDiscover
-        ? (providers.readMagpieConnection(require('node:os').homedir())?.key || savedKey)
+        ? (providers.readMagpieConnection(home)?.key || savedKey)
         : savedKey
     });
-    return {count: models.length, models: models.slice(0, 20), sample: models.slice(0, 3).map((model) => model.id)};
+    return {count: models.length, protocol: 'openai', models: models.slice(0, 20), sample: models.slice(0, 3).map((model) => model.id)};
   },
 
   async 'set-model-prefs'({providerId, prefs}) {

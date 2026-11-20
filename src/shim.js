@@ -2,6 +2,14 @@
 const http = require('node:http');
 const https = require('node:https');
 const {decode} = require('./catalogue.js');
+const {
+  toAnthropicRequest,
+  toOpenAIResponse,
+  toOpenAIError,
+  AnthropicStreamTranslator,
+  anthropicEndpoint,
+  anthropicHeaders
+} = require('./anthropic.js');
 
 // The native engine refuses any gateway that is not loopback. This shim is
 // that loopback: it speaks the OpenAI wire format to the engine and forwards
@@ -181,7 +189,168 @@ function createShim({token, getProviders, getCatalogue, onCall = () => {}, log =
     });
   });
 
+  // Anthropic-protocol upstreams (cc-switch providers, Claude-compatible
+  // gateways) take a separate path: the request and every response frame are
+  // translated so the engine keeps seeing OpenAI.
+  function forwardAnthropic({req, res, provider, aggregatedId, upstreamModel, body, onCall, log}) {
+    const started = Date.now();
+    let firstByteAt = null;
+    let status = 0;
+    let settled = false;
+    let usage = {input_tokens: 0, output_tokens: 0};
+    let upstreamResponse = null;
+    let destroyTimer = null;
+
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      if (destroyTimer) clearTimeout(destroyTimer);
+      const input = Number(usage.input_tokens) || 0;
+      const output = Number(usage.output_tokens) || 0;
+      onCall({
+        ts: started,
+        providerId: provider.id,
+        providerName: provider.name,
+        model: aggregatedId,
+        upstreamModel,
+        status,
+        durationMs: Date.now() - started,
+        ttfbMs: firstByteAt ? firstByteAt - started : null,
+        inputTokens: input,
+        outputTokens: output,
+        totalTokens: input + output,
+        error: error ? String(error.message || error) : null
+      });
+      if (error) log(`proxy error ${provider.id}/${upstreamModel}: ${error.message || error}`);
+    };
+
+    let target;
+    try {
+      target = new URL(anthropicEndpoint(provider.baseUrl));
+    } catch (error) {
+      status = 502;
+      json(res, 502, {error: {message: `invalid provider base URL: ${error.message}`, type: 'bad_gateway'}});
+      finish(error);
+      return;
+    }
+
+    const payload = Buffer.from(JSON.stringify(toAnthropicRequest(body, upstreamModel)));
+    const headers = {
+      ...anthropicHeaders(provider.key, provider.headers),
+      'content-length': payload.length,
+      'user-agent': 'cursor-bridge/0.1'
+    };
+    const transport = target.protocol === 'https:' ? https : http;
+    const request = transport.request({
+      protocol: target.protocol,
+      hostname: target.hostname,
+      port: target.port || (target.protocol === 'https:' ? 443 : 80),
+      path: `${target.pathname}${target.search}`,
+      method: 'POST',
+      headers
+    });
+
+    function resetIdle() {
+      if (destroyTimer) clearTimeout(destroyTimer);
+      destroyTimer = setTimeout(() => {
+        request.destroy(new Error(`upstream stream idle for ${IDLE_TIMEOUT_MS / 1000}s`));
+      }, IDLE_TIMEOUT_MS);
+    }
+
+    const timeout = setTimeout(() => {
+      request.destroy(new Error(`upstream did not respond within ${HEADER_TIMEOUT_MS / 1000}s`));
+    }, HEADER_TIMEOUT_MS);
+
+    request.on('response', (response) => {
+      clearTimeout(timeout);
+      upstreamResponse = response;
+      status = response.statusCode || 502;
+      firstByteAt = Date.now();
+
+      if (status >= 400) {
+        const chunks = [];
+        response.on('data', (chunk) => chunks.push(chunk));
+        response.on('end', () => {
+          let parsed = null;
+          try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { /* html or empty */ }
+          const text = JSON.stringify(toOpenAIError(parsed, status));
+          res.writeHead(status, {'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(text)});
+          res.end(text);
+          finish(new Error(`upstream HTTP ${status}`));
+        });
+        response.on('error', (error) => { res.destroy(); finish(error); });
+        return;
+      }
+
+      if (body.stream) {
+        const translator = new AnthropicStreamTranslator({model: aggregatedId});
+        res.writeHead(200, {'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store'});
+        response.on('data', (chunk) => {
+          resetIdle();
+          const converted = translator.push(chunk.toString('utf8'));
+          if (converted && !res.write(converted)) response.pause();
+        });
+        res.on('drain', () => response.resume());
+        response.on('end', () => {
+          const tail = translator.finish();
+          if (tail) res.write(tail);
+          usage = translator.usage;
+          res.end();
+          finish(null);
+        });
+        response.on('error', (error) => { res.destroy(); finish(error); });
+        return;
+      }
+
+      const chunks = [];
+      response.on('data', (chunk) => { resetIdle(); chunks.push(chunk); });
+      response.on('end', () => {
+        let parsed;
+        try {
+          parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        } catch (error) {
+          const text = JSON.stringify({error: {message: `invalid upstream response: ${error.message}`, type: 'bad_gateway'}});
+          res.writeHead(502, {'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(text)});
+          res.end(text);
+          finish(error);
+          return;
+        }
+        usage = parsed.usage || {};
+        const text = JSON.stringify(toOpenAIResponse(parsed, aggregatedId));
+        res.writeHead(200, {'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(text)});
+        res.end(text);
+        finish(null);
+      });
+      response.on('error', (error) => { res.destroy(); finish(error); });
+    });
+
+    request.on('error', (error) => {
+      clearTimeout(timeout);
+      if (destroyTimer) clearTimeout(destroyTimer);
+      if (!res.headersSent) {
+        status = 502;
+        json(res, 502, {error: {message: `upstream ${provider.id} unreachable: ${error.message}`, type: 'bad_gateway'}});
+      } else {
+        res.destroy();
+      }
+      finish(error);
+    });
+
+    res.on('close', () => {
+      if (!settled && !res.writableEnded) {
+        request.destroy();
+        if (upstreamResponse) upstreamResponse.destroy();
+        finish(new Error('client closed the stream'));
+      }
+    });
+
+    request.end(payload);
+  }
+
   function forward({req, res, provider, pathname, aggregatedId, upstreamModel, body, onCall, log}) {
+    if (provider.protocol === 'anthropic') {
+      return forwardAnthropic({req, res, provider, aggregatedId, upstreamModel, body, onCall, log});
+    }
     const started = Date.now();
     let firstByteAt = null;
     let status = 0;

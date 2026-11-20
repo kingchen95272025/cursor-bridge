@@ -125,6 +125,59 @@ test('shim 流式转发并解析 usage', async (t) => {
   assert.ok(calls[0].ttfbMs !== null);
 });
 
+test('shim 把 Anthropic 上游的流式响应翻译成 OpenAI SSE', async (t) => {
+  const calls = [];
+  const upstream = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      assert.equal(req.url, '/anthropic/v1/messages');
+      assert.equal(req.headers['x-api-key'], 'anth-key');
+      assert.equal(req.headers['anthropic-version'], '2023-06-01');
+      assert.equal(body.model, 'claude-real');
+      assert.equal(body.messages[0].content, 'hi');
+      res.writeHead(200, {'content-type': 'text/event-stream'});
+      res.write('event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":2}}}\n\n');
+      res.write('event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n');
+      res.write('event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\n');
+      res.write('event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\n');
+      res.write('event: message_stop\ndata: {"type":"message_stop"}\n\n');
+      res.end();
+    });
+  });
+  await new Promise((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+  t.after(() => upstream.close());
+  const base = `http://127.0.0.1:${upstream.address().port}/anthropic`;
+  const shim = createShim({
+    token: 'local',
+    getProviders: () => new Map([['cc', {
+      id: 'cc', name: 'CC', type: 'cc-switch', protocol: 'anthropic',
+      baseUrl: base, key: 'anth-key', headers: {}, knownModels: []
+    }]]),
+    getCatalogue: () => ({
+      models: [{id: 'cc/claude-real', providerId: 'cc', upstreamId: 'claude-real', name: 'X', context: null}],
+      groups: []
+    }),
+    onCall: (entry) => calls.push(entry)
+  });
+  const info = await shim.start(0);
+  t.after(() => shim.stop());
+  const response = await fetch(`${info.baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {Authorization: 'Bearer local', 'content-type': 'application/json'},
+    body: JSON.stringify({model: 'cc/claude-real', stream: true, messages: [{role: 'user', content: 'hi'}]})
+  });
+  assert.equal(response.status, 200);
+  const text = await response.text();
+  assert.match(text, /"content":"ok"/);
+  assert.match(text, /data: \[DONE\]/);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].inputTokens, 2);
+  assert.equal(calls[0].outputTokens, 1);
+});
+
 test('未知模型与无效 Base URL 返回明确错误', async (t) => {
   const shim = createShim({
     token: 't',

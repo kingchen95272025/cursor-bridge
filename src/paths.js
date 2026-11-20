@@ -23,6 +23,7 @@ function createPaths(root) {
     journal: j('settings-journal.json'),
     engineLog: j('logs', 'engine.log'),
     serviceLog: j('logs', 'service.log'),
+    ccSwitchCache: j('cc-switch-cache.json'),
     bridgeDb: j('data', 'bridge.db'),
     caCert: j('data', 'ca', 'ca.crt'),
     caDir: j('data', 'ca')

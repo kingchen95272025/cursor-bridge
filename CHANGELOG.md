@@ -1,5 +1,15 @@
 # 变更记录
 
+## 0.2.0（2026-11-20）
+
+### 新增
+
+- **cc-switch 实时上游**：新增 `cc-switch` 提供者类型，自动跟随 cc-switch 中当前启用的供应商（与 Magpie 自动发现同一套契约）；在 cc-switch 里切换供应商后，Cursor 侧在下个刷新周期自动跟随
+- **cc-switch 批量导入**：从 cc-switch 的 Claude / Claude Desktop 供应商中多选导入，支持搜索、去重，自动探测同网关的 OpenAI 兼容端点
+- **Anthropic Messages 协议适配**：本地中继在 OpenAI Chat Completions 与 Anthropic Messages 之间双向翻译，支持流式、工具调用、工具结果、图片与 usage；cc-switch 与 Claude Code 类网关因此可以直接作为上游
+- **自定义提供者协议选择**：可在表单中显式选择 OpenAI 兼容或 Anthropic 兼容
+- 批量导入未发现 OpenAI 端点时，自动按 Anthropic 协议接入，而不是丢弃该供应商
+
 ## 0.1.0（2026-11-20）
 
 首个 VSIX 版本。

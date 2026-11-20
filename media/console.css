@@ -289,6 +289,26 @@ button { font-family: inherit; }
   margin: 0;
 }
 
+/* cc-switch import list */
+.cc-list {
+  max-height: 46vh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.cc-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.cc-row:last-child { border-bottom: 0; }
+.cc-row:hover { background: var(--btn2-bg); }
+.cc-row[hidden] { display: none; }
+.cc-row input[type="checkbox"] { margin-top: 2px; }
+
 /* Modal */
 .modal { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; }
 .modal[hidden] { display: none; }

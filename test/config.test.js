@@ -19,6 +19,19 @@ test('Magpie Provider 默认 loopback 网关且自动发现', () => {
   assert.equal(provider.autoDiscover, true);
 });
 
+test('cc-switch Provider 允许空 Base URL 且强制 Anthropic 协议', () => {
+  const provider = normalizeProvider({id: 'ccswitch', type: 'cc-switch'});
+  assert.equal(provider.baseUrl, '');
+  assert.equal(provider.autoDiscover, true);
+  assert.equal(provider.type, 'cc-switch');
+  assert.equal(provider.protocol, 'anthropic');
+});
+
+test('自定义 Provider 的协议可显式选择', () => {
+  assert.equal(normalizeProvider({id: 'a', baseUrl: 'https://x/v1'}).protocol, 'openai');
+  assert.equal(normalizeProvider({id: 'a', baseUrl: 'https://x/anthropic', protocol: 'anthropic'}).protocol, 'anthropic');
+});
+
 test('重复与非法 Provider 被过滤，偏好只保留已知提供者', () => {
   const config = normalize({
     providers: [

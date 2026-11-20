@@ -2,7 +2,7 @@
   "name": "cursor-bridge",
   "displayName": "Cursor Bridge",
   "description": "在 Cursor 中接入 Magpie 或任意 OpenAI 兼容平台：本地桥接、聚合模型目录、一键启用。",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "kingchen95272025",
   "license": "MIT",
   "engines": {

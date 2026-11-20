@@ -238,6 +238,8 @@
         h('div', {class: 'list'},
           onboardingCard('导入 Magpie', '自动读取 Magpie → Agents 写入的本机连接，模型目录跟随 Magpie 实时更新。', '导入 Magpie', () =>
             busy($('#btnImportMagpie'), action('import-magpie').then((result) => { toast(`已导入 Magpie（${result.detected} 个模型）`); switchPage('providers'); }).catch((error) => toast(error.message, true)))),
+          onboardingCard('接入 cc-switch（自动跟随）', '把 cc-switch 当前启用的供应商作为上游；在 cc-switch 里切换供应商，Cursor 侧自动跟随。', '接入 cc-switch', () => addCcSwitchProvider()),
+          onboardingCard('从 cc-switch 导入', '读取 cc-switch 中已配置的 Claude Code 供应商；导入时自动探测它们的 OpenAI 兼容端点。', '导入 cc-switch', () => openCcSwitchModal()),
           onboardingCard('添加自定义 Base URL', '任意 OpenAI 兼容平台：OpenRouter、DeepSeek、自建网关等。密钥保存在 Cursor 的 SecretStorage。', '添加提供者', () => openProviderModal(null))
         )
       );
@@ -274,15 +276,24 @@
       const live = statusById.get(provider.id);
       const tone = !provider.enabled ? '' : live?.error ? 'warn' : live ? 'ok' : '';
       const tagText = !provider.enabled ? '已停用' : live?.error ? '异常' : live ? '在线' : '待启动';
+      const typeLabel = provider.type === 'magpie' ? 'Magpie' : provider.type === 'cc-switch' ? 'cc-switch' : '自定义';
+      const protocolTag = provider.type === 'openai' && provider.protocol === 'anthropic'
+        ? h('span', {class: 'tag', text: 'Anthropic'})
+        : null;
+      const source = provider.type === 'cc-switch'
+        ? (live?.ccSwitchName
+          ? `当前跟随：${live.ccSwitchName}${live.ccSwitchImplicit ? '（未标记当前项，使用第一个可用供应商）' : ''}`
+          : '等待桥接启动后读取 cc-switch 当前供应商')
+        : `${provider.baseUrl}${provider.autoDiscover ? ' · 自动发现' : ''}`;
       list.append(h('div', {class: 'item'},
         h('div', {class: 'item-head'},
           h('div', {},
-            h('div', {class: 'item-title'}, provider.name, h('span', {class: `tag ${tone}`, text: tagText}), h('span', {class: 'tag', text: provider.type === 'magpie' ? 'Magpie' : 'OpenAI 兼容'})),
-            h('div', {class: 'item-meta', text: `${provider.baseUrl}${provider.autoDiscover ? ' · 自动发现' : ''}`}),
+            h('div', {class: 'item-title'}, provider.name, h('span', {class: `tag ${tone}`, text: tagText}), h('span', {class: 'tag', text: typeLabel}), protocolTag),
+            h('div', {class: 'item-meta', text: source}),
             h('div', {class: 'item-meta', text: live ? `${live.models} 个模型${live.error ? ` · ${live.error}` : ''}` : '等待桥接启动后读取模型目录'})
           ),
           h('div', {class: 'item-actions'},
-            h('button', {class: 'btn', onclick: () => testProvider(provider)}, '测试'),
+            provider.type === 'cc-switch' ? null : h('button', {class: 'btn', onclick: () => testProvider(provider)}, '测试'),
             h('button', {class: 'btn', onclick: () => openProviderModal(provider)}, '编辑'),
             h('button', {class: 'btn', onclick: (event) => busy(event.target, action('toggle-provider', {id: provider.id, enabled: !provider.enabled}).catch((error) => toast(error.message, true)))}, provider.enabled ? '停用' : '启用'),
             h('button', {class: 'btn danger', onclick: () => removeProvider(provider)}, '删除')
@@ -299,6 +310,7 @@
       name: '',
       enabled: true,
       autoDiscover: false,
+      protocol: 'openai',
       baseUrl: 'https://api.openai.com/v1',
       headers: {},
       models: []
@@ -313,8 +325,9 @@
     body.replaceChildren();
 
     const type = h('select', {class: 'input select', id: 'fType'},
-      h('option', {value: 'openai', selected: draft.type !== 'magpie'}, 'OpenAI 兼容（自定义 Base URL）'),
-      h('option', {value: 'magpie', selected: draft.type === 'magpie'}, 'Magpie')
+      h('option', {value: 'openai', selected: draft.type === 'openai'}, 'OpenAI 兼容（自定义 Base URL）'),
+      h('option', {value: 'magpie', selected: draft.type === 'magpie'}, 'Magpie'),
+      h('option', {value: 'cc-switch', selected: draft.type === 'cc-switch'}, 'cc-switch（自动跟随当前供应商）')
     );
     const id = h('input', {class: 'input', id: 'fId', value: draft.id, placeholder: 'openrouter', disabled: !!provider, autocomplete: 'off'});
     const name = h('input', {class: 'input', id: 'fName', value: draft.name, placeholder: 'OpenRouter', autocomplete: 'off'});
@@ -328,14 +341,48 @@
     models.value = (draft.models || []).join('\n');
     const testResult = h('div', {class: 'hint', id: 'fTestResult'});
 
+    const protocol = h('select', {class: 'input select', id: 'fProtocol'},
+      h('option', {value: 'openai', selected: draft.protocol !== 'anthropic'}, 'OpenAI 兼容（chat/completions）'),
+      h('option', {value: 'anthropic', selected: draft.protocol === 'anthropic'}, 'Anthropic 兼容（messages）')
+    );
+    const protocolField = h('div', {class: 'field'}, h('label', {text: '上游协议'}), protocol,
+      h('div', {class: 'hint', text: 'cc-switch 与 Claude Code 类网关使用 Anthropic 协议，插件会把它翻译成 Cursor 需要的 OpenAI 格式。'}));
+    const baseUrlField = h('div', {class: 'field'}, h('label', {text: 'Base URL（OpenAI 兼容根地址，或 Anthropic 网关地址）'}), baseUrl);
+    const autoField = h('div', {class: 'field'}, h('label', {class: 'check'}, autoDiscover, '自动读取 Magpie 连接（connection.json）'));
+    const keyField = h('div', {class: 'field'}, h('label', {text: 'API Key（保存在 Cursor SecretStorage）'}), key);
+    const clearField = provider
+      ? h('div', {class: 'field'}, h('label', {class: 'check'}, clearKey, '清除已保存的密钥'))
+      : null;
+    const headersField = h('div', {class: 'field'}, h('label', {text: '自定义请求头（JSON，可选）'}), headers,
+      h('div', {class: 'hint', text: '例如 {"HTTP-Referer": "https://example.com"}；Authorization 由插件根据密钥生成。'}));
+    const modelsField = h('div', {class: 'field'}, h('label', {text: '指定模型列表（每行一个，可选）'}), models,
+      h('div', {class: 'hint', text: '留空则启动时从 {Base URL}/models 拉取；拉取失败的平台可以手填。'}));
+    const testField = h('div', {class: 'field'},
+      h('button', {class: 'btn', onclick: (event) => {
+        const provider = readProviderForm();
+        if (!provider) return;
+        busy(event.target, action('test-provider', {provider, key: key.value.trim()})
+          .then((result) => { testResult.textContent = `连接成功：${result.count} 个模型，例如 ${result.sample.join('、') || '—'}`; })
+          .catch((error) => { testResult.textContent = `连接失败：${error.message}`; }));
+      }}, '测试连接'),
+      testResult
+    );
+    const ccSwitchField = h('div', {class: 'field'},
+      h('div', {class: 'hint', text: '上游地址与令牌来自 cc-switch 当前启用的供应商；在 cc-switch 里切换后，Cursor 侧会在下个刷新周期自动跟随。'}));
+
     const syncType = () => {
       const isMagpie = type.value === 'magpie';
-      autoDiscover.closest('.field').hidden = !isMagpie;
-      if (isMagpie && autoDiscover.checked) {
+      const isCcSwitch = type.value === 'cc-switch';
+      autoField.hidden = !isMagpie;
+      protocolField.hidden = isCcSwitch || isMagpie;
+      for (const field of [baseUrlField, keyField, clearField, headersField, modelsField, testField].filter(Boolean)) {
+        field.hidden = isCcSwitch;
+      }
+      ccSwitchField.hidden = !isCcSwitch;
+      baseUrl.disabled = isMagpie;
+      if (isMagpie) {
+        autoDiscover.checked = true;
         baseUrl.value = 'http://127.0.0.1:3425/v1';
-        baseUrl.disabled = true;
-      } else {
-        baseUrl.disabled = false;
       }
     };
     type.addEventListener('change', syncType);
@@ -348,28 +395,19 @@
 
     body.append(
       h('div', {class: 'field'}, h('label', {text: '类型'}), type),
+      protocolField,
       h('div', {class: 'field-row'},
         h('div', {class: 'field'}, h('label', {text: 'ID（模型前缀，必须唯一）'}), id),
         h('div', {class: 'field'}, h('label', {text: '显示名称'}), name)
       ),
-      h('div', {class: 'field'}, h('label', {text: 'Base URL（OpenAI 兼容，通常以 /v1 结尾）'}), baseUrl),
-      h('div', {class: 'field'}, h('label', {class: 'check'}, autoDiscover, '自动读取 Magpie 连接（connection.json）')),
-      h('div', {class: 'field'}, h('label', {text: 'API Key（保存在 Cursor SecretStorage）'}), key),
-      provider ? h('div', {class: 'field'}, h('label', {class: 'check'}, clearKey, '清除已保存的密钥')) : null,
-      h('div', {class: 'field'}, h('label', {text: '自定义请求头（JSON，可选）'}), headers,
-        h('div', {class: 'hint', text: '例如 {"HTTP-Referer": "https://example.com"}；Authorization 由插件根据密钥生成。'})),
-      h('div', {class: 'field'}, h('label', {text: '指定模型列表（每行一个，可选）'}), models,
-        h('div', {class: 'hint', text: '留空则启动时从 {Base URL}/models 拉取；拉取失败的平台可以手填。'})),
-      h('div', {class: 'field'},
-        h('button', {class: 'btn', onclick: (event) => {
-          const provider = readProviderForm();
-          if (!provider) return;
-          busy(event.target, action('test-provider', {provider, key: key.value.trim()})
-            .then((result) => { testResult.textContent = `连接成功：${result.count} 个模型，例如 ${result.sample.join('、') || '—'}`; })
-            .catch((error) => { testResult.textContent = `连接失败：${error.message}`; }));
-        }}, '测试连接'),
-        testResult
-      )
+      ccSwitchField,
+      baseUrlField,
+      autoField,
+      keyField,
+      clearField,
+      headersField,
+      modelsField,
+      testField
     );
     syncType();
     showModal();
@@ -389,6 +427,21 @@
       toast('ID 只能包含小写字母、数字、- 和 _，且以字母或数字开头', true);
       return null;
     }
+    const name = $('#fName').value.trim() || id;
+    if (type === 'cc-switch') {
+      // The live provider carries no URL, key or model list of its own: all of
+      // it is resolved from cc-switch on every refresh.
+      return {
+        id,
+        type,
+        name,
+        enabled: modalState?.original?.enabled !== false,
+        autoDiscover: true,
+        baseUrl: '',
+        headers: {},
+        models: []
+      };
+    }
     let headers = {};
     const headerText = $('#fHeaders').value.trim();
     if (headerText) {
@@ -403,9 +456,10 @@
     return {
       id,
       type,
-      name: $('#fName').value.trim() || id,
+      name,
       enabled: modalState?.original?.enabled !== false,
       autoDiscover: type === 'magpie' && $('#fAutoDiscover').checked,
+      protocol: $('#fProtocol').value === 'anthropic' ? 'anthropic' : 'openai',
       baseUrl: $('#fBaseUrl').value.trim(),
       headers,
       models: $('#fModels').value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
@@ -437,6 +491,101 @@
     return action('test-provider', {provider})
       .then((result) => toast(`连接成功：${result.count} 个模型`))
       .catch((error) => toast(`连接失败：${error.message}`, true));
+  }
+
+  async function addCcSwitchProvider() {
+    const result = await action('add-cc-switch-provider').catch((error) => { toast(error.message, true); return null; });
+    if (!result) return;
+    const suffix = result.current?.implicit ? '（未标记当前供应商，使用第一个可用项）' : '';
+    toast(`${result.existing ? '已在跟随' : '已接入'} cc-switch：${result.current?.name || ''}${suffix}`);
+    switchPage('providers');
+  }
+
+  // ---- cc-switch import --------------------------------------------------
+
+  async function openCcSwitchModal() {
+    const data = await action('scan-cc-switch').catch((error) => { toast(error.message, true); return null; });
+    if (!data) return;
+    if (data.error) { toast(data.error, true); return; }
+    if (!data.providers.length) { toast('cc-switch 中没有可导入的供应商', true); return; }
+
+    modalState = {kind: 'ccswitch', providers: data.providers, selected: new Set()};
+    $('#modalTitle').textContent = `导入 cc-switch（${data.providers.length}）`;
+    const body = $('#modalBody');
+    body.replaceChildren();
+
+    const rows = [];
+    const list = h('div', {class: 'cc-list'});
+    for (const provider of data.providers) {
+      const checkbox = h('input', {type: 'checkbox'});
+      const meta = [
+        provider.appType,
+        provider.isCurrent ? '当前使用' : '',
+        provider.hasToken ? '有令牌' : '无令牌'
+      ].filter(Boolean).join(' · ');
+      const row = h('label', {class: 'cc-row'},
+        checkbox,
+        h('div', {class: 'grow'},
+          h('div', {class: 'model-name', text: provider.name}),
+          h('div', {class: 'model-id', text: provider.baseUrl}),
+          h('div', {class: 'hint', text: meta})
+        )
+      );
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) modalState?.selected.add(provider.key);
+        else modalState?.selected.delete(provider.key);
+        updateImportButton();
+      });
+      rows.push({provider, row});
+      list.append(row);
+    }
+
+    const search = h('input', {class: 'input', placeholder: '搜索名称或地址…'});
+    search.addEventListener('input', () => {
+      const query = search.value.trim().toLowerCase();
+      for (const entry of rows) {
+        entry.row.hidden = !!query && !`${entry.provider.name} ${entry.provider.baseUrl}`.toLowerCase().includes(query);
+      }
+    });
+
+    body.append(
+      h('div', {class: 'hint', text: `来源：${data.source}。cc-switch 保存的是 Anthropic 端点，导入时会自动探测同一网关的 OpenAI 兼容地址；探测失败的条目仍会导入，可在提供者页手动修正。`}),
+      h('div', {class: 'field'}, search),
+      list
+    );
+    updateImportButton();
+    showModal();
+  }
+
+  function updateImportButton() {
+    const count = modalState?.selected?.size || 0;
+    $('#modalSave').textContent = count ? `导入所选（${count}）` : '导入所选';
+  }
+
+  async function importCcSwitch() {
+    const keys = [...(modalState?.selected || [])];
+    if (!keys.length) { toast('请至少选择一个供应商', true); return; }
+    const save = $('#modalSave');
+    save.disabled = true;
+    save.textContent = '导入中…';
+    try {
+      const result = await action('import-cc-switch', {keys}, {timeout: 300000});
+      const imported = result.imported || [];
+      const failed = result.failed || [];
+      const anthropicCount = imported.filter((entry) => entry.protocol === 'anthropic').length;
+      hideModal();
+      const parts = [`已导入 ${imported.length} 个`];
+      if (anthropicCount) parts.push(`${anthropicCount} 个按 Anthropic 协议接入`);
+      if (failed.length) {
+        parts.push(`失败 ${failed.length} 个`);
+        toast(`${parts.join('，')}。${failed[0].name}：${failed[0].error}`, true);
+      } else {
+        toast(parts.join('，'));
+      }
+    } finally {
+      save.disabled = false;
+      $('#modalSave').textContent = '导入所选';
+    }
   }
 
   // ---- models ------------------------------------------------------------
@@ -735,6 +884,8 @@
       .then((result) => { toast(`已导入 Magpie（${result.detected} 个模型）`); switchPage('providers'); })
       .catch((error) => toast(error.message, true))));
     $('#btnAddProvider').addEventListener('click', () => openProviderModal(null));
+    $('#btnImportCcSwitch').addEventListener('click', () => openCcSwitchModal());
+    $('#btnAddCcSwitch').addEventListener('click', () => addCcSwitchProvider());
     $('#btnRefreshCalls').addEventListener('click', () => loadCalls(true));
     $('#btnMoreCalls').addEventListener('click', () => loadCalls(false));
     $('#btnDbStats').addEventListener('click', () => loadDatabase(false));
@@ -756,6 +907,10 @@
         const resolve = modalState.resolve;
         hideModal();
         resolve(true);
+        return;
+      }
+      if (modalState?.kind === 'ccswitch') {
+        try { await importCcSwitch(); } catch (error) { toast(error.message, true); }
         return;
       }
       try {
